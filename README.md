@@ -5,7 +5,7 @@
 [![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.7.0-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
 [![Apache Hive](https://img.shields.io/badge/Hive%20Metastore-3.1.3-FDEE21?logo=apachehive&logoColor=black)](https://hive.apache.org/)
 [![Power BI](https://img.shields.io/badge/Power%20BI-Compatible-F2C811?logo=powerbi&logoColor=black)](https://powerbi.microsoft.com/)
-[![CI](https://github.com/amitkumh9529/Real-time-traffic-DE/actions/workflows/ci.yml/badge.svg)](https://github.com/amitkumh9529/Real-time-traffic-DE/actions)
+@REM [![CI](https://github.com/amitkumh9529/Real-time-traffic-DE/actions/workflows/ci.yml/badge.svg)](https://github.com/amitkumh9529/Real-time-traffic-DE/actions)
 
 A streaming Lakehouse pipeline for vehicular mobility and telemetry events. Built using **Apache Kafka**, **Apache Spark Structured Streaming**, **Delta Lake**, **Apache Hive Metastore**, and **Power BI**, following the **Medallion Lakehouse Architecture (Bronze → Silver/Quarantine → Gold)**.
 
