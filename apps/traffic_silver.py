@@ -13,6 +13,7 @@ import sys
 
 from delta.tables import DeltaTable
 from pyspark.sql import DataFrame
+from pyspark.sql.functions import count
 
 # Support imports in container and local execution
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -121,11 +122,56 @@ def process_silver_microbatch(microbatch_df: DataFrame, batch_id: int):
     logger.info(f"Microbatch Audit [{batch_id}]: " + json.dumps(metrics))
 
 
+def process_quarantine_microbatch(quarantine_df: DataFrame, batch_id: int, spark=None):
+    """Processes streaming quarantine microbatch and persists audit metrics."""
+    active_spark = spark or quarantine_df.sparkSession
+    if quarantine_df.isEmpty():
+        logger.info(f"Quarantine Microbatch {batch_id}: Empty batch. Skipping.")
+        return
+
+    upsert_quarantine(active_spark, quarantine_df, QUARANTINE_TABLE_PATH)
+    quarantine_count = quarantine_df.count()
+
+    reasons = (
+        quarantine_df
+        .groupBy("quarantine_reason")
+        .agg(count("*").alias("count"))
+        .collect()
+    )
+    reason_breakdown = {row["quarantine_reason"]: row["count"] for row in reasons}
+
+    metrics = {
+        "pipeline_name": "TrafficSilverQuarantine",
+        "batch_id": str(batch_id),
+        "total_records": quarantine_count,
+        "valid_records": 0,
+        "quarantined_records": quarantine_count,
+        "rejection_reasons": reason_breakdown,
+    }
+    persist_batch_metrics(active_spark, metrics, METRICS_TABLE_PATH)
+    logger.info(f"Quarantine Microbatch {batch_id}: Persisted {quarantine_count} rejections and metrics.")
+
+
 def process_silver_valid_microbatch(valid_microbatch_df: DataFrame, batch_id: int, spark=None):
-    """Processes post-watermarked valid streaming microbatch."""
+    """Processes post-watermarked valid streaming microbatch and persists valid metrics."""
     active_spark = spark or valid_microbatch_df.sparkSession
+    if valid_microbatch_df.isEmpty():
+        logger.info(f"Silver Valid Microbatch {batch_id}: Empty batch. Skipping.")
+        return
+
     upsert_silver_clean(active_spark, valid_microbatch_df, SILVER_TABLE_PATH)
-    logger.info(f"Silver Valid Microbatch {batch_id}: Merged validated records.")
+    valid_count = valid_microbatch_df.count()
+
+    metrics = {
+        "pipeline_name": "TrafficSilverValid",
+        "batch_id": str(batch_id),
+        "total_records": valid_count,
+        "valid_records": valid_count,
+        "quarantined_records": 0,
+        "rejection_reasons": {},
+    }
+    persist_batch_metrics(active_spark, metrics, METRICS_TABLE_PATH)
+    logger.info(f"Silver Valid Microbatch {batch_id}: Merged {valid_count} validated records and persisted metrics.")
 
 
 def main():
@@ -142,12 +188,12 @@ def main():
     evaluated_stream = apply_data_quality_rules(bronze_stream)
     clean_candidates, quarantine_records = split_clean_and_quarantine(evaluated_stream)
 
-    # 2. Route invalid records to Quarantine table idempotently before valid deduplication
+    # 2. Route invalid records to Quarantine table idempotently with live metrics
     quarantine_query = (
         quarantine_records.writeStream
         .trigger(processingTime=f"{STREAMING_TRIGGER_SECONDS} seconds")
         .option("checkpointLocation", QUARANTINE_CHECKPOINT_PATH)
-        .foreachBatch(lambda df, b_id: upsert_quarantine(spark, df, QUARANTINE_TABLE_PATH))
+        .foreachBatch(lambda df, b_id: process_quarantine_microbatch(df, b_id, spark))
         .start()
     )
 
@@ -158,7 +204,7 @@ def main():
         .dropDuplicates(["event_id"])
     )
 
-    # 4. Write valid sanitized records via idempotent Delta MERGE
+    # 4. Write valid sanitized records via idempotent Delta MERGE with live metrics
     silver_query = (
         valid_stream.writeStream
         .trigger(processingTime=f"{STREAMING_TRIGGER_SECONDS} seconds")

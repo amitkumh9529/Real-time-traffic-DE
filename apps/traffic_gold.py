@@ -189,6 +189,25 @@ def upsert_fact_traffic(spark, microbatch_df: DataFrame):
 
     if DeltaTable.isDeltaTable(spark, GOLD_FACT_PATH):
         target = DeltaTable.forPath(spark, GOLD_FACT_PATH)
+        existing_facts = target.toDF()
+
+        # Content-consistency check: Detect reused event_id with conflicting payload attributes
+        conflicts = (
+            fact_records.alias("s")
+            .join(existing_facts.alias("t"), "event_id")
+            .filter(
+                (col("t.vehicle_id") != col("s.vehicle_id"))
+                | (col("t.road_id") != col("s.road_id"))
+                | (col("t.speed_int") != col("s.speed_int"))
+            )
+        )
+        conflict_count = conflicts.count()
+        if conflict_count > 0:
+            logger.warning(
+                f"Gold Fact Consistency Conflict: Detected {conflict_count} record(s) where existing event_id "
+                "was resubmitted with materially conflicting attributes. First-write-wins idempotency preserves canonical fact."
+            )
+
         (
             target.alias("t")
             .merge(

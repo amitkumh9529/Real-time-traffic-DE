@@ -64,7 +64,5 @@ SELECT
     CAST(total_records AS BIGINT)          AS total_records,
     CAST(valid_records AS BIGINT)          AS valid_records,
     CAST(quarantined_records AS BIGINT)    AS quarantined_records,
-    CAST(duplicate_records AS BIGINT)      AS duplicate_records,
-    CAST(late_records AS BIGINT)           AS late_records,
     CAST(rejection_reasons AS STRING)      AS rejection_reasons
 FROM pipeline_metrics;

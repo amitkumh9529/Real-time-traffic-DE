@@ -207,13 +207,18 @@ def extract_batch_metrics(
     quarantine_df: DataFrame,
     batch_id: int | str,
     pipeline_name: str = "TrafficSilverLayer",
-    duplicate_records: int = 0,
-    late_records: int = 0,
 ) -> dict[str, Any]:
-    """Calculates audit metrics for a microbatch."""
+    """Calculates observable audit metrics for a microbatch.
+
+    Note on Spark Structured Streaming deduplication:
+    Spark's stateful .withWatermark().dropDuplicates() manages state in an internal state
+    store. Duplicates and records past the watermark are dropped at the physical plan level
+    (StreamingDeduplicateExec) before downstream sinks receive rows. Therefore, metrics
+    measure observable inputs: valid records accepted, records quarantined, and rejection breakdown.
+    """
     valid_count = clean_df.count()
     invalid_count = quarantine_df.count()
-    total_count = valid_count + invalid_count + duplicate_records + late_records
+    total_count = valid_count + invalid_count
 
     reason_breakdown = {}
     if invalid_count > 0:
@@ -234,8 +239,6 @@ def extract_batch_metrics(
         "total_records": total_count,
         "valid_records": valid_count,
         "quarantined_records": invalid_count,
-        "duplicate_records": duplicate_records,
-        "late_records": late_records,
         "rejection_reasons": reason_breakdown,
     }
 
@@ -244,13 +247,11 @@ def persist_batch_metrics(spark, metrics: dict[str, Any], metrics_table_path: st
     """Idempotently writes one summary metrics row per microbatch into Delta Lake."""
     reasons_json = json.dumps(metrics.get("rejection_reasons", {}))
     escaped_reasons = reasons_json.replace("'", "''")
-    pipeline_name = str(metrics["pipeline_name"]).replace("'", "''")
-    batch_id = str(metrics["batch_id"]).replace("'", "''")
+    pipeline_name = str(metrics.get("pipeline_name", "TrafficSilver")).replace("'", "''")
+    batch_id = str(metrics.get("batch_id", "0")).replace("'", "''")
     total_records = int(metrics.get("total_records", 0))
     valid_records = int(metrics.get("valid_records", 0))
     quarantined_records = int(metrics.get("quarantined_records", 0))
-    duplicate_records = int(metrics.get("duplicate_records", 0))
-    late_records = int(metrics.get("late_records", 0))
 
     metrics_df = spark.sql(f"""
         SELECT 
@@ -260,8 +261,6 @@ def persist_batch_metrics(spark, metrics: dict[str, Any], metrics_table_path: st
             CAST({total_records} AS BIGINT) AS total_records,
             CAST({valid_records} AS BIGINT) AS valid_records,
             CAST({quarantined_records} AS BIGINT) AS quarantined_records,
-            CAST({duplicate_records} AS BIGINT) AS duplicate_records,
-            CAST({late_records} AS BIGINT) AS late_records,
             '{escaped_reasons}' AS rejection_reasons
     """)
 

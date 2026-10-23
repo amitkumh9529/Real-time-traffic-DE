@@ -86,11 +86,11 @@ The repository demonstrates intermediate-to-advanced data engineering practices:
 
 | Layer | Target Delta Path | Natural / Deduplication Key | Responsibilities & Idempotency Guarantees |
 | :--- | :--- | :--- | :--- |
-| **Bronze** | `warehouse/traffic_bronze` | Append-only (Source lineage) | • **Lossless Raw Ingestion**: Retains original Kafka `value` as binary (`raw_payload_bytes`), Base64 representation (`raw_payload_base64`), and safely decoded UTF-8 string (`raw_payload`).<br>• Captures Kafka metadata (`kafka_topic`, `kafka_partition`, `kafka_offset`, `kafka_timestamp`, `ingest_timestamp`, `kafka_key`).<br>• Uses Spark `PERMISSIVE` mode with `columnNameOfCorruptRecord` to isolate unparseable payloads without dropping them. |
-| **Silver** | `warehouse/traffic_silver` | `event_id` | • **Stateful Streaming Deduplication**: Executes `.withWatermark("event_ts", "15 minutes").dropDuplicates(["event_id"])` in Structured Streaming before writing.<br>• **Replay Idempotency**: Writes via Delta `MERGE` on `event_id` inside `foreachBatch`. Replaying a failed microbatch never duplicates Silver rows.<br>• Enriches events with physical speed categorizations (`LOW`, `MEDIUM`, `HIGH`) and peak transit flags. |
-| **Quarantine**| `warehouse/traffic_quarantine` | `(kafka_topic, kafka_partition, kafka_offset)` | • Dedicated audit sink for malformed JSON, out-of-bounds speed, clock skew, and missing contract fields.<br>• **Replay Idempotency**: Deduplicated on Kafka source coordinate identity `(kafka_topic, kafka_partition, kafka_offset)`, ensuring poison pills without an `event_id` are never duplicated on replay. |
-| **Metrics** | `warehouse/pipeline_metrics` | `(pipeline_name, batch_id)` | • Persists audit statistics per Silver microbatch: total records, valid count, quarantined count, duplicates dropped, late records dropped, and reason code breakdown JSON.<br>• **Replay Idempotency**: Merges on `(pipeline_name, batch_id)` so batch retries update metrics in-place. |
-| **Gold** | `warehouse/dim_zone`<br>`warehouse/dim_road`<br>`warehouse/fact_traffic` | `city_zone`<br>`road_id`<br>`event_id` | • **Star Schema Dimensional Model**: Fact table linked to zone and road dimensions.<br>• **True SCD Type 1**: `dim_zone` and `dim_road` execute `whenMatchedUpdate` on changed attributes (e.g. speed limit adjustments or zone re-classifications).<br>• **Fact Idempotency**: Merges strictly on global business key `event_id` with content-consistency checks. |
+| **Bronze** | `warehouse/traffic_bronze` | Append-only (Source lineage) | • **Lossless Raw Ingestion**: Retains original Kafka `value` as binary (`raw_payload_bytes`), Base64 representation (`raw_payload_base64`), and safely decoded UTF-8 string (`raw_payload`).<br>• Captures Kafka metadata (`kafka_topic`, `kafka_partition`, `kafka_offset`, `kafka_timestamp`, `ingest_timestamp`, `kafka_key`).<br>• **Production Safeguard**: Configured with `failOnDataLoss = true` by default to halt and alert upon Kafka offset gaps or retention dropouts.<br>• Spark `PERMISSIVE` mode with `columnNameOfCorruptRecord` isolates unparseable payloads without dropping them. |
+| **Silver** | `warehouse/traffic_silver` | `event_id` | • **Stateful Streaming Deduplication**: Executes `.withWatermark("event_ts", "15 minutes").dropDuplicates(["event_id"])` in Structured Streaming before writing.<br>• **Replay Idempotency**: Writes via Delta `MERGE` on `event_id` inside `foreachBatch`. Replaying a failed microbatch never duplicates Silver rows.<br>• **Live Metrics**: `process_silver_valid_microbatch()` automatically persists microbatch volume metrics to `pipeline_metrics`.<br>• Enriches events with physical speed categorizations (`LOW`, `MEDIUM`, `HIGH`) and peak transit flags. |
+| **Quarantine**| `warehouse/traffic_quarantine` | `(kafka_topic, kafka_partition, kafka_offset)` | • Dedicated audit sink for malformed JSON, out-of-bounds speed, clock skew, and missing contract fields.<br>• **Replay Idempotency**: Deduplicated on Kafka source coordinate identity `(kafka_topic, kafka_partition, kafka_offset)`, ensuring poison pills without an `event_id` are never duplicated on replay.<br>• **Live Metrics**: `process_quarantine_microbatch()` persists failure counts and granular reason code breakdowns on every microbatch. |
+| **Metrics** | `warehouse/pipeline_metrics` | `(pipeline_name, batch_id)` | • Persists audit statistics per live microbatch: `pipeline_name`, `batch_id`, `processing_timestamp`, `total_records`, `valid_records`, `quarantined_records`, and JSON rejection breakdown.<br>• **Replay Idempotency**: Merges on `(pipeline_name, batch_id)` so microbatch retries update metrics in-place. |
+| **Gold** | `warehouse/dim_zone`<br>`warehouse/dim_road`<br>`warehouse/fact_traffic` | `city_zone`<br>`road_id`<br>`event_id` | • **Star Schema Dimensional Model**: Fact table linked to zone and road dimensions.<br>• **True SCD Type 1**: `dim_zone` and `dim_road` execute `whenMatchedUpdate` on changed attributes (e.g. speed limit adjustments or zone re-classifications).<br>• **First-Write-Wins Fact Idempotency**: Facts merge on `event_id` alone. If an incoming record reuses an existing `event_id` with conflicting attributes, the pipeline detects the conflict, logs a warning, and preserves the canonical first-write fact. |
 
 ---
 
@@ -117,26 +117,34 @@ In a production streaming lakehouse interview discussion, precise delivery seman
 ### 1. Delivery Semantics Across Layers
 
 - **Kafka Ingestion**: At-least-once transport. Consumers pull messages from Kafka partitions and track offsets in Spark streaming checkpoints.
+- **Fail-On-Data-Loss**: Configured with `failOnDataLoss = true` by default in `apps/common/config.py` to prevent silent data loss if Kafka retention trims unread offsets. Can be overridden with `KAFKA_FAIL_ON_DATA_LOSS=false` when deliberate development resets are needed.
 - **Spark Structured Streaming Engine**: Checkpointed state store tracks microbatch IDs and stateful deduplication buffers in RocksDB / HDFS state stores.
 - **Delta Lake Storage**: ACID transactions ensure atomic commits per table with optimistic concurrency control.
 - **End-to-End Result**: **Effectively Exactly-Once**. While transport is at-least-once, downstream stateful deduplication and Delta `MERGE` statements guarantee that duplicate messages or re-run microbatches yield zero duplicate records in Silver, Quarantine, Metrics, or Gold.
 
-### 2. Watermark Eviction & Late Arrivals
+### 2. Watermark Eviction & Observable Metrics
 
 - The streaming pipeline defines a 15-minute watermark delay (`WATERMARK_DELAY_MINUTES = 15`) on `event_ts`.
 - **In-Window Duplicates**: If a duplicate `event_id` arrives within 15 minutes of the watermark, Spark's state store identifies the key and evicts the duplicate record from the valid stream.
-- **Late Arrivals (> 15 Minutes)**: Telemetry events arriving with `event_ts < watermark` are dropped by the streaming engine to bound memory consumption. If late data must be retained for compliance, a raw replay path reads from Bronze Delta using batch backfill.
+- **Late Arrivals (> 15 Minutes)**: Telemetry events arriving with `event_ts < watermark` are dropped by the streaming engine to bound memory consumption.
+- **Engine-Level Suppression vs. Observable Metrics**: In Spark Structured Streaming, `.withWatermark().dropDuplicates()` executes via `StreamingDeduplicateExec`. Duplicate rows and late arrivals past the watermark are dropped directly by the state store at the physical execution plan level and are never emitted to downstream `foreachBatch` sinks. Therefore, `pipeline_metrics` honestly records observable microbatch quantities (`total_records`, `valid_records`, `quarantined_records`, and `rejection_reasons`). Tracking exact dropped duplicate counts at row-level would require custom stateful operators (`flatMapGroupsWithState`) or a query listener parsing engine progress.
 
-### 3. Limitations of Cross-Table Atomicity
+### 3. Gold First-Write-Wins Idempotency & Conflict Guard
 
-In Apache Spark and Delta Lake (as of Delta Lake 3.2), multi-table atomic transactions across separate Delta paths do not exist. In `traffic_silver.py`, the microbatch writes to three distinct Delta sinks:
+- In `fact_traffic`, the business key is `event_id` alone.
+- Delta `MERGE` applies **first-write-wins idempotency**: if an `event_id` is replayed or re-transmitted, the existing fact in the Delta Lake remains canonical.
+- **Content-Consistency Conflict Detection**: Before issuing the merge, `apps/traffic_gold.py` checks incoming records against existing facts. If an `event_id` arrives with materially conflicting attributes (different vehicle, road, or speed), a warning is explicitly logged to flag potential upstream key collision or schema drift without corrupting canonical analytical history.
+
+### 4. Limitations of Cross-Table Atomicity
+
+In Apache Spark and Delta Lake (as of Delta Lake 3.2), multi-table atomic transactions across separate Delta paths do not exist. In `traffic_silver.py`, the microbatch writes to distinct Delta sinks:
 1. `traffic_silver` (Valid records)
 2. `traffic_quarantine` (Invalid records)
 3. `pipeline_metrics` (Batch statistics)
 
-Because these are three separate Delta commits, a crash (such as a worker OOM or spot instance termination) could theoretically occur after Quarantine commits but before Silver or Metrics commits.
+Because these are separate Delta commits, a crash could theoretically occur after Quarantine commits but before Silver or Metrics commits.
 
-### 4. Failure and Recovery Procedures
+### 5. Failure and Recovery Procedures
 
 The pipeline is architected so that **partial batch failures are self-healing upon restart**:
 - **Recovery Mechanism**: When the streaming job restarts, Spark's checkpoint log re-executes the uncommitted microbatch with the identical `batch_id`.

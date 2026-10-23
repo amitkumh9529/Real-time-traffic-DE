@@ -6,7 +6,7 @@ import os
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "traffic-topic")
 KAFKA_STARTING_OFFSETS = os.getenv("KAFKA_STARTING_OFFSETS", "latest")
-KAFKA_FAIL_ON_DATA_LOSS = os.getenv("KAFKA_FAIL_ON_DATA_LOSS", "false").lower() == "true"
+KAFKA_FAIL_ON_DATA_LOSS = os.getenv("KAFKA_FAIL_ON_DATA_LOSS", "true").lower() == "true"
 
 # Spark Cluster & File Paths
 SPARK_MASTER = os.getenv("SPARK_MASTER", "spark://spark-master:7077")

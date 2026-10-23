@@ -270,8 +270,6 @@ class TestSparkPipelineIntegration(unittest.TestCase):
             "total_records": 100,
             "valid_records": 85,
             "quarantined_records": 15,
-            "duplicate_records": 5,
-            "late_records": 2,
             "rejection_reasons": {"CORRUPT_JSON": 10, "INVALID_SPEED_RANGE": 5},
         }
 
@@ -293,10 +291,31 @@ class TestSparkPipelineIntegration(unittest.TestCase):
         metrics_df_2 = self.spark.read.format("delta").load(self.metrics_path)
         self.assertEqual(metrics_df_2.count(), 1, "Metrics table accumulated duplicate records on batch replay!")
 
-    def test_gold_scd_type1_dimension_updates_and_fact_idempotency(self):
-        """Verifies true SCD Type 1 updates on changed dimensions and global event_id uniqueness on facts."""
-        from delta.tables import DeltaTable
+    def test_silver_unified_microbatch_processing(self):
+        """Verifies that process_silver_microbatch executes end-to-end and persists metrics."""
+        traffic_silver.SILVER_TABLE_PATH = self.silver_path
+        traffic_silver.QUARANTINE_TABLE_PATH = self.quarantine_path
+        traffic_silver.METRICS_TABLE_PATH = self.metrics_path
 
+        now_str = datetime.now(pytz.utc).isoformat()
+        sample_records = [
+            {"kafka_topic": "traffic-topic", "kafka_partition": 0, "kafka_offset": 50, "raw_payload": '{"event_id":"mb_e1"}', "parse_status": "SUCCESS", "_corrupt_record": None, "event_id": "mb_e1", "vehicle_id": "v1", "road_id": "R100", "city_zone": "CBD", "speed": "70", "congestion_level": 2, "weather": "CLEAR", "event_time": now_str, "road_condition": None},
+            {"kafka_topic": "traffic-topic", "kafka_partition": 0, "kafka_offset": 51, "raw_payload": '{"event_id":"mb_e2"}', "parse_status": "SUCCESS", "_corrupt_record": None, "event_id": "mb_e2", "vehicle_id": "v2", "road_id": "R100", "city_zone": "CBD", "speed": "-99", "congestion_level": 1, "weather": "CLEAR", "event_time": now_str, "road_condition": None},
+        ]
+        batch_df = self._write_json_df(sample_records)
+
+        traffic_silver.process_silver_microbatch(batch_df, batch_id=77)
+
+        saved_silver = self.spark.read.format("delta").load(self.silver_path)
+        saved_quarantine = self.spark.read.format("delta").load(self.quarantine_path)
+        saved_metrics = self.spark.read.format("delta").load(self.metrics_path)
+
+        self.assertEqual(saved_silver.filter(col("event_id") == "mb_e1").count(), 1)
+        self.assertEqual(saved_quarantine.filter(col("event_id") == "mb_e2").count(), 1)
+        self.assertTrue(saved_metrics.filter(col("batch_id") == "77").count() >= 1)
+
+    def test_gold_scd_type1_dimension_updates_end_to_end(self):
+        """Verifies production upsert_dim_zone and upsert_dim_road execute true SCD Type 1 in-place updates."""
         traffic_gold.GOLD_DIM_ZONE_PATH = self.dim_zone_path
         traffic_gold.GOLD_DIM_ROAD_PATH = self.dim_road_path
         traffic_gold.GOLD_FACT_PATH = self.fact_traffic_path
@@ -312,45 +331,67 @@ class TestSparkPipelineIntegration(unittest.TestCase):
 
         dim_zone_1 = self.spark.read.format("delta").load(self.dim_zone_path).collect()
         dim_road_1 = self.spark.read.format("delta").load(self.dim_road_path).collect()
-        fact_1 = self.spark.read.format("delta").load(self.fact_traffic_path).collect()
 
         self.assertEqual(len(dim_zone_1), 1)
         self.assertEqual(len(dim_road_1), 1)
-        self.assertEqual(len(fact_1), 1)
         self.assertEqual(dim_zone_1[0]["zone_type"], "Commercial")
         self.assertEqual(dim_road_1[0]["speed_limit"], 100)
 
-        # Batch 2: Update reference dimension attributes (SCD Type 1 in-place update)
-        zone_updates = self._write_json_df([{
-            "city_zone": "CBD",
-            "zone_type": "URBAN_CORE",
-            "traffic_risk": "EXTREME",
-        }])
-        target_zone = DeltaTable.forPath(self.spark, self.dim_zone_path)
-        (
-            target_zone.alias("t")
-            .merge(zone_updates.alias("s"), "t.city_zone = s.city_zone")
-            .whenMatchedUpdate(
-                condition="t.zone_type != s.zone_type OR t.traffic_risk != s.traffic_risk",
-                set={
-                    "zone_type": "s.zone_type",
-                    "traffic_risk": "s.traffic_risk",
-                },
-            )
-            .whenNotMatchedInsertAll()
-            .execute()
-        )
+        # Batch 2: Reference metadata is updated (e.g., road reclassification or urban zoning change)
+        orig_zone_meta = dict(traffic_gold.ZONE_REFERENCE["CBD"])
+        orig_road_meta = dict(traffic_gold.ROAD_REFERENCE["R100"])
 
-        dim_zone_2 = self.spark.read.format("delta").load(self.dim_zone_path).collect()
-        # Verify SCD-1: Count remains 1, but zone_type updated in-place!
-        self.assertEqual(len(dim_zone_2), 1, "SCD Type 1 must not create duplicate dimension rows!")
-        self.assertEqual(dim_zone_2[0]["zone_type"], "URBAN_CORE", "SCD Type 1 must update changed attributes in place!")
-        self.assertEqual(dim_zone_2[0]["traffic_risk"], "EXTREME")
+        try:
+            traffic_gold.ZONE_REFERENCE["CBD"] = {"zone_type": "Urban Core", "traffic_risk": "CRITICAL"}
+            traffic_gold.ROAD_REFERENCE["R100"] = {"road_type": "Expressway", "speed_limit": 60}
 
-        # Replay Batch 1 facts
-        traffic_gold.process_gold_microbatch(batch_df_1, batch_id=2)
+            # Run production dimension upsert functions
+            traffic_gold.upsert_dim_zone(self.spark, batch_df_1)
+            traffic_gold.upsert_dim_road(self.spark, batch_df_1)
+
+            dim_zone_2 = self.spark.read.format("delta").load(self.dim_zone_path).collect()
+            dim_road_2 = self.spark.read.format("delta").load(self.dim_road_path).collect()
+
+            # Assert true SCD Type 1 in-place update by production functions
+            self.assertEqual(len(dim_zone_2), 1, "SCD Type 1 must not create duplicate zone rows!")
+            self.assertEqual(dim_zone_2[0]["zone_type"], "Urban Core", "Production upsert_dim_zone must update zone_type in-place!")
+            self.assertEqual(dim_zone_2[0]["traffic_risk"], "CRITICAL")
+
+            self.assertEqual(len(dim_road_2), 1, "SCD Type 1 must not create duplicate road rows!")
+            self.assertEqual(dim_road_2[0]["road_type"], "Expressway", "Production upsert_dim_road must update road_type in-place!")
+            self.assertEqual(dim_road_2[0]["speed_limit"], 60)
+        finally:
+            traffic_gold.ZONE_REFERENCE["CBD"] = orig_zone_meta
+            traffic_gold.ROAD_REFERENCE["R100"] = orig_road_meta
+
+    def test_gold_fact_content_consistency_and_first_write_wins(self):
+        """Verifies that existing facts are preserved (first-write-wins) when duplicate event_ids carry conflicting data."""
+        traffic_gold.GOLD_FACT_PATH = self.fact_traffic_path
+
+        now_str = datetime.now(pytz.utc).isoformat()
+        initial_record = [
+            {"event_id": "e_conflict_test", "vehicle_id": "v_original", "road_id": "R100", "city_zone": "CBD", "speed_int": 80, "congestion_level": 2, "weather": "CLEAR", "event_ts": now_str, "event_date": "2026-10-23", "hour": 10, "peak_flag": 1, "speed_band": "HIGH"},
+        ]
+        batch_1 = self._write_json_df(initial_record)
+        traffic_gold.upsert_fact_traffic(self.spark, batch_1)
+
+        fact_1 = self.spark.read.format("delta").load(self.fact_traffic_path).collect()
+        self.assertEqual(len(fact_1), 1)
+        self.assertEqual(fact_1[0]["vehicle_id"], "v_original")
+        self.assertEqual(fact_1[0]["speed_int"], 80)
+
+        # Conflicting batch: Same event_id, but different vehicle and speed
+        conflicting_record = [
+            {"event_id": "e_conflict_test", "vehicle_id": "v_imposter", "road_id": "R100", "city_zone": "CBD", "speed_int": 25, "congestion_level": 5, "weather": "STORM", "event_ts": now_str, "event_date": "2026-10-23", "hour": 10, "peak_flag": 1, "speed_band": "LOW"},
+        ]
+        batch_2 = self._write_json_df(conflicting_record)
+        traffic_gold.upsert_fact_traffic(self.spark, batch_2)
+
         fact_2 = self.spark.read.format("delta").load(self.fact_traffic_path).collect()
-        self.assertEqual(len(fact_2), 1, "Fact table must remain strictly unique by event_id!")
+        # Assert first-write-wins: original attributes remain intact, zero duplicates
+        self.assertEqual(len(fact_2), 1, "Fact table must not accumulate duplicates!")
+        self.assertEqual(fact_2[0]["vehicle_id"], "v_original", "First-write-wins must preserve the original fact!")
+        self.assertEqual(fact_2[0]["speed_int"], 80, "Original speed must not be overwritten by conflicting record!")
 
 
 if __name__ == "__main__":

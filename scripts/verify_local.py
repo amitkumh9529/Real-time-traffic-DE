@@ -57,6 +57,8 @@ def run_local_verification() -> None:
         SparkSession.builder
         .master("local[2]")
         .appName("LocalPipelineVerification")
+        .config("spark.driver.host", "127.0.0.1")
+        .config("spark.driver.bindAddress", "127.0.0.1")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.sql.shuffle.partitions", "2")
