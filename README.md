@@ -1,206 +1,210 @@
-# Real-Time Mobility & Traffic Data Engineering Lakehouse
+# Real-Time Mobility & Traffic Lakehouse Pipeline
 
 [![Apache Spark](https://img.shields.io/badge/Apache%20Spark-3.5.1-E25A1C?logo=apachespark&logoColor=white)](https://spark.apache.org/)
 [![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.2.0-00ADD8?logo=delta&logoColor=white)](https://delta.io/)
 [![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.7.0-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
 [![Apache Hive](https://img.shields.io/badge/Hive%20Metastore-3.1.3-FDEE21?logo=apachehive&logoColor=black)](https://hive.apache.org/)
 [![Power BI](https://img.shields.io/badge/Power%20BI-Compatible-F2C811?logo=powerbi&logoColor=black)](https://powerbi.microsoft.com/)
-@REM [![CI](https://github.com/amitkumh9529/Real-time-traffic-DE/actions/workflows/ci.yml/badge.svg)](https://github.com/amitkumh9529/Real-time-traffic-DE/actions)
 
-A streaming Lakehouse pipeline for vehicular mobility and telemetry events. Built using **Apache Kafka**, **Apache Spark Structured Streaming**, **Delta Lake**, **Apache Hive Metastore**, and **Power BI**, following the **Medallion Lakehouse Architecture (Bronze → Silver/Quarantine → Gold)**.
+A streaming data engineering lakehouse pipeline for high-frequency vehicular telemetry and traffic congestion intelligence. Built with **Apache Kafka**, **Apache Spark Structured Streaming**, **Delta Lake**, **Apache Hive Metastore**, and **Power BI**, implementing the **Medallion Architecture (Bronze → Silver/Quarantine → Gold)**.
 
-The project demonstrates production data engineering patterns: lossless raw ingestion, permissive schema parsing with corrupt-record isolation, a dedicated Delta quarantine table with granular reason codes, watermark-bounded deduplication, idempotent Star Schema dimensional modeling via Delta `MERGE`, and comprehensive automated testing.
+The repository demonstrates intermediate-to-advanced data engineering practices: genuinely lossless raw Kafka byte ingestion, streaming watermark deduplication, replay-idempotent Delta MERGE operations across all layers, true SCD Type 1 dimension updates, microbatch data-quality metrics persistence, and comprehensive automated test coverage without Docker dependencies.
 
 ---
 
-## Architecture
+## Architecture & Data Flow
 
 ```
-                       +---------------------------------------+
-                       |       IoT Traffic Telemetry           |
-                       |    (producer/traffic_dirty_producer)  |
-                       +-------------------+-------------------+
-                                           |
-                                           v  (JSON / Raw bytes over Kafka)
-                       +-------------------+-------------------+
-                       |      Apache Kafka (KRaft Mode)        |
-                       |         Topic: traffic-topic          |
-                       +-------------------+-------------------+
-                                           |
-                                           v  (Kafka Source: offsets, timestamps)
-                       +-------------------+-------------------+
-                       |   BRONZE: Lossless Ingestion Job      |
-                       |   - Stores raw bytes & metadata       |
-                       |   - Mode: PERMISSIVE corrupt capture  |
-                       +-------------------+-------------------+
-                                           |
-                                           v  (Delta Lake)
-                       +-------------------+-------------------+
-                       |            traffic_bronze             |
-                       +-------------------+-------------------+
-                                           |
-                                           v  (foreachBatch validation)
-                       +-------------------+-------------------+
-                       |   SILVER: Data Quality & Routing      |
-                       |   - Schema validation & type casting  |
-                       |   - 15-min Watermark & Deduplication  |
-                       +---------+-------------------+---------+
-                                 |                   |
-               (Valid Records)   v                   v   (Rejected Records)
-     +---------------------------+----+         +----+---------------------------+
-     |         traffic_silver         |         |       traffic_quarantine       |
-     |  Clean, typed, enriched events |         |  Reason codes & error details  |
-     +---------------------------+----+         +--------------------------------+
-                                 |
-                                 v  (foreachBatch Idempotent MERGE)
-     +---------------------------+-----------------------------------------------+
-     |                         GOLD: Dimensional Model                           |
-     |                                                                           |
-     |   [ dim_zone ]            [ dim_road ]            [ fact_traffic ]        |
-     |   MERGE on city_zone      MERGE on road_id        MERGE on event_id       |
-     |   (SCD Type 1)            (SCD Type 1)            Partitioned by date     |
-     +-----------------------------------+---------------------------------------+
-                                         |
-                                         v
-     +-----------------------------------+---------------------------------------+
-     |      Hive Metastore (PostgreSQL Backend) -> Spark Thrift Server           |
-     |                 Power BI DirectQuery / Import Views                       |
-     +---------------------------------------------------------------------------+
+                         +-----------------------------------------------+
+                         |           IoT Traffic Telemetry               |
+                         |     (producer/traffic_dirty_producer.py)      |
+                         +-----------------------+-----------------------+
+                                                 |
+                                                 v  (JSON / Raw Corrupt Bytes)
+                         +-----------------------+-----------------------+
+                         |       Apache Kafka 3.7.0 (KRaft Mode)         |
+                         |             Topic: traffic-topic              |
+                         +-----------------------+-----------------------+
+                                                 |
+                                                 v  (Kafka Source: offsets, raw bytes)
+                         +-----------------------+-----------------------+
+                         |      BRONZE: Lossless Raw Ingestion           |
+                         |  - Persists raw_payload_bytes (BinaryType)    |
+                         |  - Encodes raw_payload_base64 & raw_payload   |
+                         |  - Stores topic, partition, offset, timestamp |
+                         |  - Mode: PERMISSIVE corrupt-record capture    |
+                         +-----------------------+-----------------------+
+                                                 |
+                                                 v  (Delta Lake: Append-only)
+                         +-----------------------+-----------------------+
+                         |             traffic_bronze                    |
+                         +-----------------------+-----------------------+
+                                                 |
+                                                 v  (Spark Structured Streaming)
+                         +-----------------------+-----------------------+
+                         |       SILVER: Quality, Watermark, & Routing   |
+                         |  - Rule-based validation engine               |
+                         |  - Invalid / corrupt records -> Quarantine    |
+                         |  - Valid stream: 15-min Watermark & Stateful  |
+                         |    Deduplication on event_id                  |
+                         +-----------+-----------------------+-----------+
+                                     |                       |
+                     (Valid Events)  v                       v  (Rejections)
+            +------------------------+---+       +-----------+------------------------+
+            |      traffic_silver        |       |       traffic_quarantine           |
+            | - Idempotent MERGE on      |       | - Idempotent MERGE on              |
+            |   event_id                 |       |   (kafka_topic, partition, offset) |
+            | - Enriched speed bands     |       | - Deterministic reason codes       |
+            +------------------------+---+       +------------------------------------+
+                                     |
+                                     |----------> +-----------------------------------+
+                                     |            |         pipeline_metrics          |
+                                     |            | - Idempotent MERGE on             |
+                                     |            |   (pipeline_name, batch_id)       |
+                                     |            | - Audit counts & failure reasons  |
+                                     |            +-----------------------------------+
+                                     v  (foreachBatch Idempotent Star Schema)
+            +------------------------+------------------------------------------------+
+            |                      GOLD: Dimensional Model                            |
+            |                                                                         |
+            |     [ dim_zone ]              [ dim_road ]            [ fact_traffic ]  |
+            |   True SCD Type 1           True SCD Type 1           Idempotent MERGE  |
+            |   MERGE on city_zone        MERGE on road_id          MERGE on event_id |
+            |   (whenMatchedUpdate)       (whenMatchedUpdate)       Partitioned date  |
+            +--------------------------------+----------------------------------------+
+                                             |
+                                             v
+            +--------------------------------+----------------------------------------+
+            |      Hive Metastore (PostgreSQL Backend) -> Spark Thrift Server         |
+            |           Power BI DirectQuery / Import Analytics Views                 |
+            +-------------------------------------------------------------------------+
 ```
 
 ---
 
 ## Medallion Layer Design
 
-| Layer | Storage Path | Deduplication Key / Target | Primary Responsibilities |
+| Layer | Target Delta Path | Natural / Deduplication Key | Responsibilities & Idempotency Guarantees |
 | :--- | :--- | :--- | :--- |
-| **Bronze** | `warehouse/traffic_bronze` | Append-only | • Lossless raw ingestion retaining `topic`, `partition`, `offset`, and timestamps.<br>• Spark `PERMISSIVE` parsing captures malformed bytes into `_corrupt_record`.<br>• Preserves unmapped fields in `raw_payload`. Zero silent data loss. |
-| **Silver** | `warehouse/traffic_silver` | `event_id` | • Validates physical boundaries (`0 <= speed <= 160 km/h`) and required fields.<br>• Filters out malformed JSON, clock skew (>10m future), and type errors.<br>• 15-minute watermark on `event_ts` for bounded state deduplication.<br>• Feature engineering: `speed_band`, `peak_flag`, `hour`. |
-| **Quarantine**| `warehouse/traffic_quarantine` | Append-only audit | • Dedicated reject store for all invalid/corrupt records.<br>• Stores `quarantine_reason` code, `error_details`, raw payload, and Kafka metadata.<br>• Emits microbatch audit metrics (valid, quarantined, rejection breakdown). |
-| **Gold** | `warehouse/dim_zone`<br>`warehouse/dim_road`<br>`warehouse/fact_traffic` | `city_zone`<br>`road_id`<br>`event_id` | • Star Schema dimensional model with natural key constraints.<br>• Idempotent Delta `MERGE` via `foreachBatch` (prevents duplicate facts and dimensions on re-run).<br>• Fact table partitioned by `event_date`. |
+| **Bronze** | `warehouse/traffic_bronze` | Append-only (Source lineage) | • **Lossless Raw Ingestion**: Retains original Kafka `value` as binary (`raw_payload_bytes`), Base64 representation (`raw_payload_base64`), and safely decoded UTF-8 string (`raw_payload`).<br>• Captures Kafka metadata (`kafka_topic`, `kafka_partition`, `kafka_offset`, `kafka_timestamp`, `ingest_timestamp`, `kafka_key`).<br>• Uses Spark `PERMISSIVE` mode with `columnNameOfCorruptRecord` to isolate unparseable payloads without dropping them. |
+| **Silver** | `warehouse/traffic_silver` | `event_id` | • **Stateful Streaming Deduplication**: Executes `.withWatermark("event_ts", "15 minutes").dropDuplicates(["event_id"])` in Structured Streaming before writing.<br>• **Replay Idempotency**: Writes via Delta `MERGE` on `event_id` inside `foreachBatch`. Replaying a failed microbatch never duplicates Silver rows.<br>• Enriches events with physical speed categorizations (`LOW`, `MEDIUM`, `HIGH`) and peak transit flags. |
+| **Quarantine**| `warehouse/traffic_quarantine` | `(kafka_topic, kafka_partition, kafka_offset)` | • Dedicated audit sink for malformed JSON, out-of-bounds speed, clock skew, and missing contract fields.<br>• **Replay Idempotency**: Deduplicated on Kafka source coordinate identity `(kafka_topic, kafka_partition, kafka_offset)`, ensuring poison pills without an `event_id` are never duplicated on replay. |
+| **Metrics** | `warehouse/pipeline_metrics` | `(pipeline_name, batch_id)` | • Persists audit statistics per Silver microbatch: total records, valid count, quarantined count, duplicates dropped, late records dropped, and reason code breakdown JSON.<br>• **Replay Idempotency**: Merges on `(pipeline_name, batch_id)` so batch retries update metrics in-place. |
+| **Gold** | `warehouse/dim_zone`<br>`warehouse/dim_road`<br>`warehouse/fact_traffic` | `city_zone`<br>`road_id`<br>`event_id` | • **Star Schema Dimensional Model**: Fact table linked to zone and road dimensions.<br>• **True SCD Type 1**: `dim_zone` and `dim_road` execute `whenMatchedUpdate` on changed attributes (e.g. speed limit adjustments or zone re-classifications).<br>• **Fact Idempotency**: Merges strictly on global business key `event_id` with content-consistency checks. |
 
 ---
 
 ## Data Quality Contract & Reason Codes
 
-Every incoming record is evaluated through the validation engine (`apps/common/validation.py`). Valid records are routed to Silver; non-conforming records are routed to `traffic_quarantine` with one of the following deterministic reason codes:
+Every incoming record is evaluated by `apps/common/validation.py`. Clean records route to Silver; non-conforming records route to `traffic_quarantine` with deterministic audit codes:
 
-| Reason Code | Condition | Action Taken |
+| Quarantine Reason Code | Condition | Behavior |
 | :--- | :--- | :--- |
-| `CORRUPT_JSON` | Payload failed JSON parsing (`_corrupt_record` is populated). | Routed to quarantine with corrupt byte payload. |
-| `MISSING_REQUIRED_FIELD` | One or more mandatory fields (`event_id`, `vehicle_id`, `road_id`, `city_zone`, `event_time`) are null or blank. | Quarantined; identified fields listed. |
-| `INVALID_TIMESTAMP_FORMAT` | `event_time` string cannot be parsed into an ISO-8601 UTC timestamp. | Quarantined with raw timestamp text. |
-| `INVALID_SPEED_TYPE` | `speed` is present but contains non-numeric text (e.g. `"fast"`, `"eighty"`). | Quarantined; type cast failure logged. |
-| `INVALID_SPEED_RANGE` | `speed` integer is outside physical limits (`< 0` or `> 160 km/h`). | Quarantined with out-of-bound speed value. |
-| `FUTURE_TIMESTAMP_SKEW` | `event_ts` is more than 10 minutes ahead of current processing time. | Quarantined; timestamp skew flagged. |
-| `DUPLICATE_EVENT` | Record with an identical `event_id` already ingested within the watermark window. | Dropped from Silver during deduplication. |
+| `CORRUPT_JSON` | Payload failed JSON schema parsing (`_corrupt_record` is populated). | Quarantined with raw corrupt byte payload and Kafka source offsets. |
+| `MISSING_REQUIRED_FIELD` | One or more mandatory fields (`event_id`, `vehicle_id`, `road_id`, `city_zone`, `event_time`) are null or blank. | Quarantined; missing fields cataloged in `error_details`. |
+| `INVALID_TIMESTAMP_FORMAT`| `event_time` cannot be parsed into an ISO-8601 UTC timestamp. | Quarantined with unparseable timestamp text. |
+| `INVALID_SPEED_TYPE` | `speed` contains non-numeric text or unsupported datatype. | Quarantined; conversion exception logged. |
+| `INVALID_SPEED_RANGE` | `speed` is outside physical vehicular limits (`< 0` or `> 160 km/h`). | Quarantined with out-of-bound speed integer. |
+| `FUTURE_TIMESTAMP_SKEW` | `event_ts` is more than 10 minutes ahead of processing time. | Quarantined to prevent streaming watermark corruption. |
+| `DUPLICATE_EVENT` | Duplicate `event_id` arriving within the active watermark window. | Dropped by stateful streaming engine; audited in metrics. |
 
 ---
 
-## Streaming Semantics & Guarantees
+## System Semantics, Idempotency, and Failure Recovery
 
-### 1. Delivery Semantics
-- **Kafka Source**: At-least-once ingestion. Messages are committed by Spark Structured Streaming via internal checkpointing after the microbatch is successfully written.
-- **Silver Deduplication**: Deduplicated on `event_id` within a **15-minute watermark window** (`withWatermark("event_ts", "15 minutes").dropDuplicates(["event_id"])`).
-- **Gold Sinks**: Idempotent Delta `MERGE` writes. Even if a microbatch is replayed (e.g., node failure, streaming restart), Delta Lake merges matching `event_id` records in `fact_traffic`, ensuring **effectively exactly-once** end-to-end semantics.
-- *Note:* This pipeline does not claim native two-phase commit. End-to-end consistency is achieved through **at-least-once transport combined with idempotent Delta MERGE operations**.
+In a production streaming lakehouse interview discussion, precise delivery semantics and failure boundaries are paramount.
 
-### 2. Watermark Policy & Late Data
-- The pipeline applies a **15-minute watermark delay** (`WATERMARK_DELAY_MINUTES = 15`) on `event_ts`.
-- Events arriving more than 15 minutes after the watermark advances are dropped from stateful streaming deduplication memory.
+### 1. Delivery Semantics Across Layers
 
-### 3. Checkpointing & State Isolation
-- Streaming checkpoints are stored in isolated directories (`chk_bronze`, `chk_silver`, `chk_gold`).
-- Rebuilding or resetting a layer requires cleaning only that specific layer's checkpoint and Delta directory.
+- **Kafka Ingestion**: At-least-once transport. Consumers pull messages from Kafka partitions and track offsets in Spark streaming checkpoints.
+- **Spark Structured Streaming Engine**: Checkpointed state store tracks microbatch IDs and stateful deduplication buffers in RocksDB / HDFS state stores.
+- **Delta Lake Storage**: ACID transactions ensure atomic commits per table with optimistic concurrency control.
+- **End-to-End Result**: **Effectively Exactly-Once**. While transport is at-least-once, downstream stateful deduplication and Delta `MERGE` statements guarantee that duplicate messages or re-run microbatches yield zero duplicate records in Silver, Quarantine, Metrics, or Gold.
 
----
+### 2. Watermark Eviction & Late Arrivals
 
-## Directory Structure
+- The streaming pipeline defines a 15-minute watermark delay (`WATERMARK_DELAY_MINUTES = 15`) on `event_ts`.
+- **In-Window Duplicates**: If a duplicate `event_id` arrives within 15 minutes of the watermark, Spark's state store identifies the key and evicts the duplicate record from the valid stream.
+- **Late Arrivals (> 15 Minutes)**: Telemetry events arriving with `event_ts < watermark` are dropped by the streaming engine to bound memory consumption. If late data must be retained for compliance, a raw replay path reads from Bronze Delta using batch backfill.
 
-```text
-mobility-analytics/
-├── .env.example                 # Standardized environment template
-├── .github/workflows/ci.yml     # Automated CI (linting, tests)
-├── docker-compose.yml           # Pinned image infrastructure definition
-├── Makefile                     # Linux / macOS CLI runner
-├── run.ps1                      # Windows PowerShell CLI runner
-├── requirements.txt             # Pipeline Python dependencies
-├── requirements-dev.txt         # Dev, linting, and testing dependencies
-├── README.md                    # System architecture and operations manual
-│
-├── apps/                        # Spark Structured Streaming Applications
-│   ├── common/                  # Reusable production modules
-│   │   ├── config.py            # Centralized settings and warehouse paths
-│   │   ├── reference.py         # Domain lookup dictionaries and validation bounds
-│   │   ├── spark_session.py     # Local / cluster SparkSession factory
-│   │   └── validation.py        # Reusable Data Quality validation and metrics
-│   ├── traffic_bronze.py        # Bronze ingestion (Kafka -> Delta)
-│   ├── traffic_silver.py        # Silver & Quarantine routing (Delta -> Delta)
-│   └── traffic_gold.py          # Gold Star Schema (idempotent Delta MERGE)
-│
-├── config/                      # Service configuration templates
-│   └── hive/hive-site.xml       # Hive Metastore JDBC and warehouse paths
-│
-├── producer/                    # IoT Telemetry Generator
-│   ├── requirements.txt         # Producer dependencies
-│   └── traffic_dirty_producer.py# Emits clean events + 9 anomaly classes
-│
-├── sql/                         # Hive / Spark SQL Scripts
-│   ├── 01_init_database.sql     # Database initialization (mobility)
-│   ├── 02_create_delta_tables.sql# Registers Bronze, Silver, Quarantine, Gold
-│   ├── 03_create_bi_views.sql   # Creates typed BI reporting views
-│   ├── 04_validation_queries.sql# Table health checks and KPI validation
-│   └── init_all.sql             # Unified master SQL registration script
-│
-├── scripts/                     # Operational automation scripts
-│   ├── verify_local.py          # Zero-Docker local end-to-end verification
-│   ├── 01_create_kafka_topic.sh # Kafka topic initialization
-│   ├── 02_submit_bronze.sh      # Submits Bronze streaming job
-│   ├── 03_submit_silver.sh      # Submits Silver streaming job
-│   ├── 04_submit_gold.sh        # Submits Gold dimensional modeling job
-│   ├── 05_init_metastore.sh     # Registers tables in Hive Metastore
-│   └── 06_start_thrift_server.sh# Launches Spark Thrift Server (JDBC/ODBC)
-│
-└── tests/                       # Automated Test Suite
-    ├── test_producer.py         # Producer anomalies and seed determinism tests
-    ├── test_validation.py       # Reusable Data Quality rules and routing tests
-    └── test_spark_pipeline.py   # Bronze parsing, Quarantine, and Gold MERGE tests
-```
+### 3. Limitations of Cross-Table Atomicity
+
+In Apache Spark and Delta Lake (as of Delta Lake 3.2), multi-table atomic transactions across separate Delta paths do not exist. In `traffic_silver.py`, the microbatch writes to three distinct Delta sinks:
+1. `traffic_silver` (Valid records)
+2. `traffic_quarantine` (Invalid records)
+3. `pipeline_metrics` (Batch statistics)
+
+Because these are three separate Delta commits, a crash (such as a worker OOM or spot instance termination) could theoretically occur after Quarantine commits but before Silver or Metrics commits.
+
+### 4. Failure and Recovery Procedures
+
+The pipeline is architected so that **partial batch failures are self-healing upon restart**:
+- **Recovery Mechanism**: When the streaming job restarts, Spark's checkpoint log re-executes the uncommitted microbatch with the identical `batch_id`.
+- **Silver Idempotency**: Clean records are upserted via `MERGE INTO traffic_silver USING ... ON target.event_id = source.event_id`. Re-processing an already-inserted event results in a no-op.
+- **Quarantine Idempotency**: Rejection records are upserted via `MERGE INTO traffic_quarantine USING ... ON target.kafka_topic = source.kafka_topic AND target.kafka_partition = source.kafka_partition AND target.kafka_offset = source.kafka_offset`. Re-running the batch updates existing records without duplication, even when `event_id` is null or corrupt.
+- **Metrics Idempotency**: Batch metrics are upserted via `MERGE INTO pipeline_metrics USING ... ON target.pipeline_name = source.pipeline_name AND target.batch_id = source.batch_id`. Re-running updates the batch summary without duplicate rows.
 
 ---
 
-## Local Verification (Zero-Docker Mode)
+## Environment Prerequisites
 
-You can verify the entire pipeline locally without Docker. The verification script generates deterministic telemetry, parses Bronze records, routes valid events to Silver and invalid events to Quarantine, and verifies Gold Delta `MERGE` idempotency.
+The project supports both containerized Docker deployment and zero-Docker local execution:
 
-### 1. Install Dependencies
+| Prerequisite | Minimum Version | Verification / Discovery Notes |
+| :--- | :--- | :--- |
+| **Python** | `3.10` - `3.14` | Tested on Python 3.14. Virtual environment recommended. |
+| **Java JDK / JRE** | `Java 8`, `11`, or `17` | `JAVA_HOME` must be set and on `PATH`. Required for PySpark JVM runtime. |
+| **Apache Spark** | `3.5.1` (bundled via PySpark) | `SPARK_HOME` is discovered dynamically at runtime via `os.path.dirname(pyspark.__file__)`. |
+| **Delta Lake** | `3.2.0` | Configured automatically via `delta-spark` package and Ivy resolution. |
+| **Windows Hadoop Binaries** | `Hadoop 3.3.4` | Windows local execution requires `winutils.exe` and `hadoop.dll` in `C:\hadoop\bin`. Automatically configured if present. |
+| **Docker & Compose** | `Docker 24.0+`, `Compose v2` | Required only for multi-container cluster mode (Kafka, Metastore, Postgres, Thrift). |
+
+> **Note on Docker-Free Local Verification**: Zero-Docker local verification runs native PySpark jobs locally against temporary directories. It requires local Java (JDK 8/11/17) and Python dependencies (`pip install -r requirements.txt -r requirements-dev.txt`), with `winutils.exe` present on Windows systems.
+
+---
+
+## Verification & Execution Guide
+
+### 1. Code Quality & Linting
+Run Ruff check across all application code, producer, tests, and scripts:
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
+python -m ruff check apps producer tests scripts
 ```
+*Expected result: Exits with code 0 (All checks passed).*
 
-### 2. Run All Automated Tests
+### 2. Automated Test Suite
+Execute the 23-test unit and integration test suite locally:
 ```powershell
 # Windows PowerShell
 .\run.ps1 test
 
 # Linux / Mac / WSL
-make test
-```
-*Direct command:*
-```bash
 python -m unittest discover tests
 ```
 
-### 3. Run End-to-End Pipeline Verification
+#### Test Suite Coverage:
+- `test_producer.py`: Deterministic seed reproducibility, schema contract conformance, 9 distinct edge anomaly classes, raw byte serialization.
+- `test_validation.py`: Null/corrupt payload routing, speed boundary limits (0-160 km/h), future clock skew detection, metric calculation.
+- `test_spark_pipeline.py`:
+  - Bronze lossless binary bytes retention and corrupt-record isolation.
+  - Silver & Quarantine replay idempotency (assert zero row accumulation on duplicate execution).
+  - Stateful streaming deduplication across microbatches within the 15-minute watermark window.
+  - Delta metrics table persistence and idempotent update on `(pipeline_name, batch_id)`.
+  - Gold true SCD Type 1 in-place attribute updates and global `event_id` fact uniqueness.
+
+*Expected result: `Ran 23 tests ... OK`.*
+
+### 3. Local End-to-End Pipeline Verification
+Run the automated end-to-end simulation script:
 ```powershell
 # Windows PowerShell
 .\run.ps1 verify
 
 # Linux / Mac / WSL
-make verify
+python scripts/verify_local.py
 ```
 
-#### Verified Pipeline Output:
+#### Verification Terminal Output:
 ```text
 ================================================================================
 MOBILITY ANALYTICS - LOCAL END-TO-END PIPELINE VERIFICATION
@@ -218,103 +222,79 @@ MOBILITY ANALYTICS - LOCAL END-TO-END PIPELINE VERIFICATION
 [Step 4] Executing Gold Layer Star Schema idempotent MERGE operations...
  -> Initial Gold Facts: 38 | Zones: 5 | Roads: 4
 
-[Step 5] Re-executing Gold MERGE with the EXACT same batch to verify idempotency...
+[Step 5] Re-executing ALL MERGE operations with the EXACT same batch to verify replay idempotency...
+ -> Post-Replay Silver Count: 38 (expected: 38)
+ -> Post-Replay Quarantine Count: 11 (expected: 11)
+ -> Post-Replay Metrics Records: 1 (expected: 1)
  -> Post-Replay Gold Facts: 38 | Zones: 5 | Roads: 4
- -> Idempotency Verified: Exactly 0 duplicates accumulated upon re-run.
+ -> Idempotency Verified: Exactly 0 duplicates accumulated across all layers upon re-run.
 
 ================================================================================
 ALL END-TO-END PIPELINE CHECKS PASSED SUCCESSFULLY!
 ================================================================================
 ```
 
----
+### 4. Dockerized Cluster Execution
 
-## Dockerized Cluster Execution
-
-When running with Docker Compose, the complete infrastructure stack is orchestrated:
-
-### 1. Start Infrastructure
+When running with full infrastructure:
 ```powershell
-# Windows
+# 1. Start containers (Kafka, Postgres, Hive Metastore, Spark Master/Worker)
 .\run.ps1 up
 
-# Linux / Mac
-make up
-```
-Services started:
-- **PostgreSQL 13** (`postgres:13.16-alpine`, port `5435`)
-- **Apache Hive Metastore 3.1.3** (`rtdt/hive-metastore:3.1.3`, port `9083`)
-- **Apache Spark 3.5.1 Master & Worker** (`rtdt/spark:3.5.1`, ports `8080`, `8081`, `7077`, `10000`)
-- **Apache Kafka 3.7.0 (KRaft)** (`apache/kafka:3.7.0`, port `9092`, `29092`)
-- **Kafka UI** (`provectuslabs/kafka-ui:v0.7.2`, `http://localhost:8090`)
-
-### 2. Create Topic
-```powershell
+# 2. Initialize Kafka topic
 .\run.ps1 topic
-```
 
-### 3. Launch Streaming Jobs
-In separate terminals:
-```powershell
-# Terminal 1: Bronze
+# 3. Submit Spark streaming jobs in separate terminals
 .\run.ps1 bronze
-
-# Terminal 2: Silver & Quarantine
 .\run.ps1 silver
-
-# Terminal 3: Gold
 .\run.ps1 gold
-```
 
-### 4. Start Producer
-```powershell
-# Terminal 4: Telemetry Producer
+# 4. Launch deterministic IoT telemetry producer
 .\run.ps1 producer
-```
 
-To run with a deterministic seed for reproducible debugging:
-```bash
-python producer/traffic_dirty_producer.py --seed 42 --clean-ratio 0.80
-```
-
-### 5. Register Metastore Tables & Start Thrift Server
-```powershell
+# 5. Initialize Hive Metastore tables & launch Spark Thrift Server for Power BI
 .\run.ps1 init-db
 .\run.ps1 thrift
 ```
 
-### 6. Reset Local Warehouse Data
-To reset generated Delta Lake tables and streaming checkpoints cleanly:
-```powershell
-.\run.ps1 reset
-```
-
 ---
 
-## Inspecting Quarantined Records & Metrics
+## Data Quality Monitoring & SQL Queries
 
-To inspect rejected records and review data-quality metrics:
+To inspect quality metrics, poison pills, and pipeline health via Hive/Spark SQL (`sql/04_validation_queries.sql`):
 
 ```sql
--- Query quarantine Delta table via Spark SQL / Thrift Server
+-- 1. Inspect Microbatch Processing Trends & Quality Rates
+SELECT 
+    batch_id,
+    processing_timestamp,
+    total_records,
+    valid_records,
+    quarantined_records,
+    duplicate_records,
+    late_records,
+    ROUND((valid_records * 100.0) / NULLIF(total_records, 0), 2) AS clean_data_pct
+FROM mobility.pipeline_metrics
+ORDER BY CAST(batch_id AS BIGINT) DESC
+LIMIT 20;
+
+-- 2. Quarantine Rejection Breakdown
 SELECT 
     quarantine_reason,
     COUNT(*) AS total_rejected,
-    MIN(ingest_timestamp) AS earliest_failure,
-    MAX(ingest_timestamp) AS latest_failure
+    MIN(ingest_timestamp) AS earliest_rejection,
+    MAX(ingest_timestamp) AS latest_rejection
 FROM mobility.traffic_quarantine
 GROUP BY quarantine_reason
 ORDER BY total_rejected DESC;
 
--- Inspect sample poison pills
+-- 3. Verify Zero Duplicate Facts
 SELECT 
-    quarantine_reason,
-    error_details,
-    raw_payload,
-    kafka_partition,
-    kafka_offset
-FROM mobility.traffic_quarantine
-LIMIT 10;
+    event_id,
+    COUNT(*) AS occurrences
+FROM mobility.fact_traffic
+GROUP BY event_id
+HAVING COUNT(*) > 1;
 ```
 
 ---
@@ -322,30 +302,34 @@ LIMIT 10;
 ## Power BI Integration
 
 1. In **Power BI Desktop**, select **Get Data** → **Spark** (or **ODBC** / **Hive LLAP**).
-2. Enter connection details:
+2. Enter connection coordinates:
    - **Server**: `localhost`
    - **Port**: `10000`
    - **Protocol**: `HTTP` or `Binary`
    - **Database**: `mobility`
-3. Select analytical views:
-   - `bi_fact_traffic`: Enriched vehicular observations.
-   - `bi_dim_zone`: Zone reference, land use category, and congestion risk.
-   - `bi_dim_road`: Road classification and speed limits.
-   - `bi_traffic_quarantine`: Real-time data quality failure monitoring.
-4. Set relationships:
+3. Reporting Views:
+   - `bi_fact_traffic`: Vehicular observations with time/speed dimensions.
+   - `bi_dim_zone`: Zone geography, land use classification, and congestion risk.
+   - `bi_dim_road`: Road hierarchy, corridor identifiers, and speed limit thresholds.
+   - `bi_pipeline_metrics`: Microbatch ingestion SLAs, throughput, and clean record ratios.
+   - `bi_traffic_quarantine`: Real-time data quality failure diagnostics.
+4. Schema Relationships:
    - `bi_fact_traffic[road_id]` → `bi_dim_road[road_id]` (Many-to-One)
    - `bi_fact_traffic[city_zone]` → `bi_dim_zone[city_zone]` (Many-to-One)
 
 ---
 
-## Local Development Notes & Known Limitations
+## Production Limitations & Next Steps
 
-1. **Windows Native Hadoop I/O**: Local Windows Spark execution requires `winutils.exe` and `hadoop.dll` matching the Hadoop version (`3.3.4`). Both `run.ps1` and `tests/test_spark_pipeline.py` automatically detect and resolve `HADOOP_HOME` and `PATH`.
-2. **Hive Metastore Port**: Postgres backend is mapped to host port `5435` to avoid conflicting with default local PostgreSQL instances on port `5432`.
-3. **Kafka in Docker vs Host**: Internal Docker network connects via `kafka:9092`; host-based scripts connect via `localhost:29092`.
-4. **Watermark State Eviction**: In local standalone microbatches without an active continuous stream, late-data assertions are validated deterministically via unit tests in `tests/test_validation.py`.
+For a production deployment in an enterprise cloud environment (AWS, GCP, or Azure), the following architectural enhancements should be planned:
+
+1. **Dead-Letter Alerting & PagerDuty/Slack Integration**: Currently, quarantine records are persisted to Delta. In production, a streaming monitor or threshold alert on `pipeline_metrics` should trigger alerts when `quarantined_records / total_records` exceeds 5% over a 5-minute rolling window.
+2. **Secrets Management**: Configuration in `.env` should be replaced with managed secret stores (e.g., AWS Secrets Manager, HashiCorp Vault, Azure Key Vault) with IAM role-based authentication rather than static credentials.
+3. **Table Optimization & Lifecycle Compaction**: Streaming microbatches generate small Delta files. A production deployment requires scheduled `OPTIMIZE ... ZORDER BY (event_ts, road_id)` maintenance jobs alongside `VACUUM` policies (e.g., 7-day retention) to manage storage costs and maintain query performance.
+4. **Distributed Orchestration**: Moving from standalone Docker to managed Kubernetes (Amazon EKS / Google GKE) or managed platforms (Databricks, AWS EMR Serverless) with autoscaling driver/executor pools and cluster spot termination handling.
+5. **Schema Evolution Policies**: Currently, schema drift is captured in `raw_payload`. Implementing schema evolution with explicit contract versioning and automated Avro/Protobuf schema registries (e.g., Confluent Schema Registry) prevents silent field semantic shifts.
 
 ---
 
 ## License
-Distributed under the Apache 2.0 License. See `LICENSE` for details.
+Distributed under the Apache 2.0 License.

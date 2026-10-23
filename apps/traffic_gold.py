@@ -2,9 +2,9 @@
 
 Reads validated telemetry events from the Silver Delta table and utilizes foreachBatch
 with Delta Lake MERGE operations to guarantee:
-  1. dim_zone: Strictly unique natural key (city_zone) enriched with reference metadata.
-  2. dim_road: Strictly unique natural key (road_id) enriched with reference metadata.
-  3. fact_traffic: Strictly deduplicated event facts by (event_id, event_date), partitioned by event_date.
+  1. dim_zone: Strictly unique natural key (city_zone), true SCD Type 1 updating of reference attributes.
+  2. dim_road: Strictly unique natural key (road_id), true SCD Type 1 updating of reference attributes.
+  3. fact_traffic: Strictly deduplicated event facts merged on globally unique event_id, partitioned by event_date.
 
 Re-running batches or restarting streaming queries produces zero duplicate facts or dimensions.
 """
@@ -12,18 +12,16 @@ Re-running batches or restarting streaming queries produces zero duplicate facts
 import logging
 import os
 import sys
+
+from delta.tables import DeltaTable
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col, lit, when
-from pyspark.sql.types import IntegerType, StringType, StructField, StructType
-from delta.tables import DeltaTable
 
 # Support imports in container and local execution
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from common.config import (
-    GOLD_DIM_ROAD_CHECKPOINT_PATH,
     GOLD_DIM_ROAD_PATH,
-    GOLD_DIM_ZONE_CHECKPOINT_PATH,
     GOLD_DIM_ZONE_PATH,
     GOLD_FACT_CHECKPOINT_PATH,
     GOLD_FACT_PATH,
@@ -40,7 +38,7 @@ from common.spark_session import get_spark_session
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] [TrafficGold] %(message)s"
+    format="%(asctime)s [%(levelname)s] [TrafficGold] %(message)s",
 )
 logger = logging.getLogger("TrafficGold")
 
@@ -86,7 +84,7 @@ def build_speed_limit_expr():
 
 
 def upsert_dim_zone(spark, microbatch_df: DataFrame):
-    """Idempotently upserts city zones into dim_zone Delta table."""
+    """Idempotently upserts city zones into dim_zone Delta table using true SCD Type 1."""
     distinct_zones = (
         microbatch_df
         .select("city_zone")
@@ -104,6 +102,13 @@ def upsert_dim_zone(spark, microbatch_df: DataFrame):
         (
             target.alias("t")
             .merge(distinct_zones.alias("s"), "t.city_zone = s.city_zone")
+            .whenMatchedUpdate(
+                condition="t.zone_type != s.zone_type OR t.traffic_risk != s.traffic_risk",
+                set={
+                    "zone_type": "s.zone_type",
+                    "traffic_risk": "s.traffic_risk",
+                },
+            )
             .whenNotMatchedInsertAll()
             .execute()
         )
@@ -117,7 +122,7 @@ def upsert_dim_zone(spark, microbatch_df: DataFrame):
 
 
 def upsert_dim_road(spark, microbatch_df: DataFrame):
-    """Idempotently upserts road corridors into dim_road Delta table."""
+    """Idempotently upserts road corridors into dim_road Delta table using true SCD Type 1."""
     distinct_roads = (
         microbatch_df
         .select("road_id")
@@ -135,6 +140,13 @@ def upsert_dim_road(spark, microbatch_df: DataFrame):
         (
             target.alias("t")
             .merge(distinct_roads.alias("s"), "t.road_id = s.road_id")
+            .whenMatchedUpdate(
+                condition="t.road_type != s.road_type OR t.speed_limit != s.speed_limit",
+                set={
+                    "road_type": "s.road_type",
+                    "speed_limit": "s.speed_limit",
+                },
+            )
             .whenNotMatchedInsertAll()
             .execute()
         )
@@ -148,7 +160,11 @@ def upsert_dim_road(spark, microbatch_df: DataFrame):
 
 
 def upsert_fact_traffic(spark, microbatch_df: DataFrame):
-    """Idempotently merges event facts into fact_traffic partitioned by event_date."""
+    """Idempotently merges event facts into fact_traffic partitioned by event_date.
+
+    Business Key: event_id alone is globally unique across all partitions and dates.
+    Data-Quality Guard: If an event_id is matched with conflicting content, existing immutable facts are preserved.
+    """
     fact_records = (
         microbatch_df
         .select(
@@ -163,7 +179,7 @@ def upsert_fact_traffic(spark, microbatch_df: DataFrame):
             "event_date",
             "hour",
             "peak_flag",
-            "speed_band"
+            "speed_band",
         )
         .dropDuplicates(["event_id"])
     )
@@ -177,7 +193,7 @@ def upsert_fact_traffic(spark, microbatch_df: DataFrame):
             target.alias("t")
             .merge(
                 fact_records.alias("s"),
-                "t.event_id = s.event_id AND t.event_date = s.event_date"
+                "t.event_id = s.event_id",
             )
             .whenNotMatchedInsertAll()
             .execute()
@@ -200,11 +216,11 @@ def process_gold_microbatch(microbatch_df: DataFrame, batch_id: int):
 
     spark = microbatch_df.sparkSession
 
-    # 1. Upsert Dimensions
+    # 1. Upsert Dimensions with SCD Type 1 updates
     upsert_dim_zone(spark, microbatch_df)
     upsert_dim_road(spark, microbatch_df)
 
-    # 2. Upsert Partitioned Facts
+    # 2. Upsert Partitioned Facts on globally unique event_id
     upsert_fact_traffic(spark, microbatch_df)
 
     logger.info(f"Gold Microbatch {batch_id}: Idempotent Star Schema update completed.")

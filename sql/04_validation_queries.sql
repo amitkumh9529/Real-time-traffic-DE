@@ -31,3 +31,15 @@ SELECT
 FROM bi_fact_traffic
 GROUP BY city_zone, road_id
 ORDER BY total_events DESC;
+
+-- Inspect Pipeline Metrics History & Trend
+SELECT 
+    pipeline_name,
+    batch_id,
+    processing_timestamp,
+    total_records,
+    valid_records,
+    quarantined_records,
+    rejection_reasons
+FROM bi_pipeline_metrics
+ORDER BY processing_timestamp DESC;

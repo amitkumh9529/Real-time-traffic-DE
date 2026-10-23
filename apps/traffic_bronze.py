@@ -7,7 +7,9 @@ parses known schema attributes in PERMISSIVE mode with explicit _corrupt_record 
 
 import os
 import sys
+
 from pyspark.sql.functions import (
+    base64,
     col,
     current_timestamp,
     expr,
@@ -68,26 +70,29 @@ def build_bronze_stream(spark, kafka_bootstrap=None, topic=None):
         .load()
     )
 
-    # 1. Capture Raw Metadata Losslessly
+    # 1. Capture Raw Metadata & Binary Values Losslessly
     base_stream = raw_stream.select(
         col("topic").alias("kafka_topic"),
         col("partition").alias("kafka_partition"),
         col("offset").alias("kafka_offset"),
         col("timestamp").alias("kafka_timestamp"),
         current_timestamp().alias("ingest_timestamp"),
-        expr("CAST(value AS STRING)").alias("raw_payload")
+        col("key").alias("kafka_key"),
+        col("value").alias("raw_payload_bytes"),
+        base64(col("value")).alias("raw_payload_base64"),
+        expr("CAST(value AS STRING)").alias("raw_payload"),
     )
 
     # 2. Parse JSON using PERMISSIVE mode with _corrupt_record capture
     schema = get_traffic_schema()
     json_options = {
         "mode": "PERMISSIVE",
-        "columnNameOfCorruptRecord": "_corrupt_record"
+        "columnNameOfCorruptRecord": "_corrupt_record",
     }
 
     parsed = base_stream.withColumn(
         "parsed",
-        from_json(col("raw_payload"), schema, json_options)
+        from_json(col("raw_payload"), schema, json_options),
     )
 
     # 3. Derive Parse Status & Flatten
@@ -97,6 +102,9 @@ def build_bronze_stream(spark, kafka_bootstrap=None, topic=None):
         col("kafka_offset"),
         col("kafka_timestamp"),
         col("ingest_timestamp"),
+        col("kafka_key"),
+        col("raw_payload_bytes"),
+        col("raw_payload_base64"),
         col("raw_payload"),
         when(col("parsed._corrupt_record").isNotNull(), lit("CORRUPT"))
         .otherwise(lit("SUCCESS")).alias("parse_status"),
@@ -109,7 +117,7 @@ def build_bronze_stream(spark, kafka_bootstrap=None, topic=None):
         col("parsed.congestion_level").alias("congestion_level"),
         col("parsed.weather").alias("weather"),
         col("parsed.event_time").alias("event_time"),
-        col("parsed.road_condition").alias("road_condition")
+        col("parsed.road_condition").alias("road_condition"),
     )
 
     return bronze_flattened

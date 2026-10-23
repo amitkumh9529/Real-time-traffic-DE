@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS traffic_quarantine
 USING DELTA
 LOCATION '/opt/spark/warehouse/traffic_quarantine';
 
+CREATE TABLE IF NOT EXISTS pipeline_metrics
+USING DELTA
+LOCATION '/opt/spark/warehouse/pipeline_metrics';
+
 -- Create Analytical Views
 CREATE OR REPLACE VIEW bi_fact_traffic AS
 SELECT
@@ -69,3 +73,16 @@ SELECT
     CAST(ingest_timestamp AS TIMESTAMP)  AS ingest_timestamp,
     CAST(rejection_timestamp AS TIMESTAMP) AS rejection_timestamp
 FROM traffic_quarantine;
+
+CREATE OR REPLACE VIEW bi_pipeline_metrics AS
+SELECT
+    CAST(pipeline_name AS STRING)          AS pipeline_name,
+    CAST(batch_id AS STRING)               AS batch_id,
+    CAST(processing_timestamp AS TIMESTAMP) AS processing_timestamp,
+    CAST(total_records AS BIGINT)          AS total_records,
+    CAST(valid_records AS BIGINT)          AS valid_records,
+    CAST(quarantined_records AS BIGINT)    AS quarantined_records,
+    CAST(duplicate_records AS BIGINT)      AS duplicate_records,
+    CAST(late_records AS BIGINT)           AS late_records,
+    CAST(rejection_reasons AS STRING)      AS rejection_reasons
+FROM pipeline_metrics;

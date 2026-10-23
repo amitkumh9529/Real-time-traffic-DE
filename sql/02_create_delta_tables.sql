@@ -32,3 +32,8 @@ LOCATION '/opt/spark/warehouse/traffic_bronze';
 CREATE TABLE IF NOT EXISTS traffic_silver
 USING DELTA
 LOCATION '/opt/spark/warehouse/traffic_silver';
+
+-- Metrics Table: Microbatch Data Quality & Replay Audits
+CREATE TABLE IF NOT EXISTS pipeline_metrics
+USING DELTA
+LOCATION '/opt/spark/warehouse/pipeline_metrics';

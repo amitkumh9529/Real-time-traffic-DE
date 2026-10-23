@@ -10,9 +10,10 @@ Verifies:
 import json
 import unittest
 from datetime import datetime
+
 import pytz
+
 from producer.traffic_dirty_producer import (
-    ANOMALY_TYPES,
     ROADS,
     WEATHER,
     ZONES,
@@ -57,7 +58,7 @@ class TestTrafficProducer(unittest.TestCase):
         """Verifies malformed JSON is returned as raw un-wrapped bytes."""
         payload = self.generator.generate_dirty_event("malformed_json")
         self.assertIsInstance(payload, bytes)
-        with self.assertRaises(Exception):
+        with self.assertRaises(json.JSONDecodeError):
             json.loads(payload.decode("utf-8", errors="ignore"))
 
     def test_anomaly_duplicate_event(self):

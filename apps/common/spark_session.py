@@ -1,24 +1,30 @@
-"""SparkSession builder supporting both distributed cluster and local test modes."""
-
 import os
-import sys
+
 from pyspark.sql import SparkSession
+
+
+def _ensure_windows_hadoop_env():
+    """Configures HADOOP_HOME and SPARK_HOME environment."""
+    import pyspark
+    os.environ["SPARK_HOME"] = os.path.dirname(pyspark.__file__)
+
+    if os.name == "nt":
+        hadoop_home = os.environ.get("HADOOP_HOME", r"C:\hadoop")
+        if os.path.exists(hadoop_home):
+            os.environ.setdefault("HADOOP_HOME", hadoop_home)
+            hadoop_bin = os.path.join(hadoop_home, "bin")
+            if os.path.exists(hadoop_bin) and hadoop_bin not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = f"{hadoop_bin};" + os.environ.get("PATH", "")
 
 
 def get_spark_session(
     app_name: str,
-    master: str = None,
+    master: str | None = None,
     enable_hive: bool = True,
-    local_mode: bool = False
+    local_mode: bool = False,
 ) -> SparkSession:
-    """Builds and returns a Delta Lake-enabled SparkSession.
-    
-    Args:
-        app_name: Application name reported in Spark UI.
-        master: Spark master URL (defaults to env SPARK_MASTER or local).
-        enable_hive: Whether to enable Hive Metastore catalog integration.
-        local_mode: If True, configures optimized local standalone instance.
-    """
+    """Builds and returns a Delta Lake-enabled SparkSession."""
+    _ensure_windows_hadoop_env()
     spark_master = master or os.getenv("SPARK_MASTER", "spark://spark-master:7077")
     
     if local_mode or spark_master.startswith("local"):

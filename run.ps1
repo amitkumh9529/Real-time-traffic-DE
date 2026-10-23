@@ -72,16 +72,22 @@ switch ($Command) {
     }
     "test" {
         Write-Host "[INFO] Running automated test suite..." -ForegroundColor Cyan
-        if (-not $env:HADOOP_HOME) { $env:HADOOP_HOME = "C:\hadoop" }
-        $env:PATH = "$env:HADOOP_HOME\bin;" + $env:PATH
-        $env:SPARK_HOME = "C:\Users\amith\AppData\Local\Programs\Python\Python314\Lib\site-packages\pyspark"
+        if (-not $env:HADOOP_HOME -and (Test-Path "C:\hadoop")) { $env:HADOOP_HOME = "C:\hadoop" }
+        if ($env:HADOOP_HOME -and (Test-Path "$env:HADOOP_HOME\bin")) { $env:PATH = "$env:HADOOP_HOME\bin;" + $env:PATH }
+        if (-not $env:SPARK_HOME) {
+            $pysparkPath = python -c "import os, pyspark; print(os.path.dirname(pyspark.__file__))" 2>$null
+            if ($pysparkPath) { $env:SPARK_HOME = $pysparkPath.Trim() }
+        }
         python -m unittest discover tests
     }
     "verify" {
         Write-Host "[INFO] Running zero-Docker local end-to-end pipeline verification..." -ForegroundColor Cyan
-        if (-not $env:HADOOP_HOME) { $env:HADOOP_HOME = "C:\hadoop" }
-        $env:PATH = "$env:HADOOP_HOME\bin;" + $env:PATH
-        $env:SPARK_HOME = "C:\Users\amith\AppData\Local\Programs\Python\Python314\Lib\site-packages\pyspark"
+        if (-not $env:HADOOP_HOME -and (Test-Path "C:\hadoop")) { $env:HADOOP_HOME = "C:\hadoop" }
+        if ($env:HADOOP_HOME -and (Test-Path "$env:HADOOP_HOME\bin")) { $env:PATH = "$env:HADOOP_HOME\bin;" + $env:PATH }
+        if (-not $env:SPARK_HOME) {
+            $pysparkPath = python -c "import os, pyspark; print(os.path.dirname(pyspark.__file__))" 2>$null
+            if ($pysparkPath) { $env:SPARK_HOME = $pysparkPath.Trim() }
+        }
         python scripts\verify_local.py
     }
     "init-db" {

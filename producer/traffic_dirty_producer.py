@@ -14,7 +14,8 @@ import signal
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
+
 import pytz
 from faker import Faker
 
@@ -43,7 +44,7 @@ ANOMALY_TYPES = [
 class TrafficEventGenerator:
     """Deterministic event generator for mobility telemetry events."""
 
-    def __init__(self, seed: Optional[int] = None, base_time: Optional[datetime] = None):
+    def __init__(self, seed: int | None = None, base_time: datetime | None = None):
         self.seed = seed
         self.rng = random.Random(seed)
         self.fake = Faker()
@@ -56,8 +57,8 @@ class TrafficEventGenerator:
             else None
         )
         self.step_counter = 0
-        self.vehicle_pool: List[str] = [self.fake.uuid4() for _ in range(50)]
-        self.recent_events_cache: List[Dict[str, Any]] = []
+        self.vehicle_pool: list[str] = [self.fake.uuid4() for _ in range(50)]
+        self.recent_events_cache: list[dict[str, Any]] = []
         self.max_cache_size = 200
 
     def _get_current_time(self) -> datetime:
@@ -66,7 +67,7 @@ class TrafficEventGenerator:
             return self.base_time + timedelta(seconds=self.step_counter)
         return datetime.now(pytz.utc)
 
-    def generate_clean_event(self) -> Dict[str, Any]:
+    def generate_clean_event(self) -> dict[str, Any]:
         """Generates a fully valid telemetry event conforming to the data contract."""
         event_id = self.fake.uuid4()
         vehicle_id = self.rng.choice(self.vehicle_pool)
@@ -88,11 +89,11 @@ class TrafficEventGenerator:
 
         return event
 
-    def generate_dirty_event(self, anomaly_type: Optional[str] = None) -> Union[Dict[str, Any], bytes]:
+    def generate_dirty_event(self, anomaly_type: str | None = None) -> dict[str, Any] | bytes:
         """Generates an anomalous payload adhering to one of 9 edge cases.
         
         Returns:
-            Dict[str, Any] for structural anomalies, or raw bytes for malformed payloads.
+            dict[str, Any] for structural anomalies, or raw bytes for malformed payloads.
         """
         chosen_type = anomaly_type or self.rng.choice(ANOMALY_TYPES)
 
@@ -150,7 +151,7 @@ class TrafficEventGenerator:
 
         return base
 
-    def next_event(self, clean_ratio: float = 0.70) -> Tuple[Union[Dict[str, Any], bytes], str]:
+    def next_event(self, clean_ratio: float = 0.70) -> tuple[dict[str, Any] | bytes, str]:
         """Emits the next payload with classification."""
         if self.rng.random() < clean_ratio:
             return self.generate_clean_event(), "clean"
@@ -158,7 +159,7 @@ class TrafficEventGenerator:
         return self.generate_dirty_event(dirty_type), dirty_type
 
 
-def serialize_payload(event: Union[Dict[str, Any], bytes]) -> bytes:
+def serialize_payload(event: dict[str, Any] | bytes) -> bytes:
     """Serializes event to bytes. Preserves raw bytes without JSON wrapping."""
     if isinstance(event, bytes):
         return event
@@ -169,6 +170,7 @@ def get_kafka_producer(bootstrap_servers: str, retries: int = 5, delay_seconds: 
     """Establishes connection to Kafka broker with exponential backoff."""
     try:
         from kafka import KafkaProducer
+        from kafka.errors import KafkaError
     except ImportError:
         logger.error("kafka-python-ng is not installed.")
         sys.exit(1)
@@ -180,7 +182,7 @@ def get_kafka_producer(bootstrap_servers: str, retries: int = 5, delay_seconds: 
                 bootstrap_servers=bootstrap_servers,
                 value_serializer=serialize_payload
             )
-        except Exception as e:
+        except (KafkaError, OSError, ConnectionRefusedError, TimeoutError) as e:
             logger.warning(f"Kafka unavailable ({e}). Retrying in {delay_seconds}s...")
             time.sleep(delay_seconds)
 
@@ -191,10 +193,10 @@ def get_kafka_producer(bootstrap_servers: str, retries: int = 5, delay_seconds: 
 def run_producer(
     bootstrap_servers: str = "localhost:29092",
     topic: str = "traffic-topic",
-    seed: Optional[int] = None,
+    seed: int | None = None,
     delay_min: float = 0.5,
     delay_max: float = 1.5,
-    max_events: Optional[int] = None
+    max_events: int | None = None
 ):
     """Continuously generates and streams telemetry events to Kafka."""
     generator = TrafficEventGenerator(seed=seed)
@@ -228,7 +230,7 @@ def run_producer(
                 break
 
             time.sleep(random.uniform(delay_min, delay_max))
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             logger.error(f"Error publishing event: {e}")
             time.sleep(1)
 

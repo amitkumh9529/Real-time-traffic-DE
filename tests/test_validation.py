@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+
 import pytz
 from pyspark.sql import SparkSession
 
@@ -32,7 +33,17 @@ class TestValidationEngine(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        os.environ["SPARK_HOME"] = r"C:\Users\amith\AppData\Local\Programs\Python\Python314\Lib\site-packages\pyspark"
+        if sys.platform == "win32":
+            hadoop_home = os.environ.get("HADOOP_HOME", r"C:\hadoop")
+            if os.path.exists(hadoop_home):
+                os.environ["HADOOP_HOME"] = hadoop_home
+                bin_dir = os.path.join(hadoop_home, "bin")
+                if bin_dir not in os.environ.get("PATH", ""):
+                    os.environ["PATH"] = f"{bin_dir};{os.environ.get('PATH', '')}"
+
+        import pyspark
+        os.environ["SPARK_HOME"] = os.path.dirname(pyspark.__file__)
+
         cls.spark = (
             SparkSession.builder
             .master("local[1]")
@@ -58,8 +69,7 @@ class TestValidationEngine(unittest.TestCase):
         self.file_counter += 1
         path = os.path.join(self.test_dir, f"records_{self.file_counter}.json")
         with open(path, "w", encoding="utf-8") as f:
-            for r in dict_records:
-                f.write(json.dumps(r) + "\n")
+            f.writelines(json.dumps(r) + "\n" for r in dict_records)
         return self.spark.read.json(path)
 
     def test_clean_record_passes_validation(self):
